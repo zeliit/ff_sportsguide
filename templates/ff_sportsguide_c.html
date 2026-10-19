@@ -172,9 +172,6 @@
   var refreshButton = document.getElementById("c-refresh");
   if(refreshButton) refreshButton.addEventListener("click", reloadMatches);
 
-  {% if c.stale or not c.available %}
-  setTimeout(reloadMatches, 500);
-  {% endif %}
 
   document.querySelectorAll(".c-play").forEach(function(button){
     button.addEventListener("click", function(){

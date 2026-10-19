@@ -154,9 +154,6 @@
   });
   var refreshButton = document.getElementById("b-refresh");
   if(refreshButton) refreshButton.addEventListener("click", reloadMatches);
-  {% if b.stale or not b.available %}
-  setTimeout(reloadMatches, 500);
-  {% endif %}
   document.querySelectorAll('.b-play').forEach(function(button){
     button.addEventListener('click',function(){
       var title=displayMatchName(button.getAttribute('data-title')||'스포츠 중계 B', button.getAttribute('data-category'), button.getAttribute('data-league'));

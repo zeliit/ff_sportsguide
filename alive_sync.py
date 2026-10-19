@@ -26,6 +26,27 @@ ENTRY_RE = re.compile(r"^([ ]{4})([^\s#].*?):\s*(?:#.*)?$")
 
 DEFAULT_PATH = str(DB_DIR / "alive.yaml")
 LOCK_PATH = LOCK_DIR / "alive.lock"
+BACKUP_KEEP_COUNT = 7
+
+
+def _prune_alive_backups(path, keep=BACKUP_KEEP_COUNT):
+    """Keep only the newest dated SportsGuide backups for alive.yaml."""
+    path = Path(path)
+    prefix = path.name + ".bak-sportsguide-"
+    backups = []
+    for item in path.parent.glob(prefix + "*"):
+        suffix = item.name[len(prefix):]
+        if item.is_file() and re.fullmatch(r"[0-9]{8}", suffix):
+            backups.append(item)
+    backups.sort(key=lambda item: item.name, reverse=True)
+    removed = 0
+    for old_backup in backups[max(1, int(keep)):]:
+        try:
+            old_backup.unlink()
+            removed += 1
+        except OSError:
+            pass
+    return removed
 
 
 def _line_body(line):
@@ -225,6 +246,7 @@ def sync_alive_desired(desired, yaml_path=DEFAULT_PATH, dry_run=False):
         backup = path.with_name(path.name + ".bak-sportsguide-" + datetime.now().strftime("%Y%m%d"))
         if not backup.exists():
             shutil.copy2(path, backup)
+        backups_pruned = _prune_alive_backups(path)
         fd, temp_name = tempfile.mkstemp(prefix=".alive.sportsguide.", dir=str(path.parent))
         try:
             with os.fdopen(fd, "wb") as t:
@@ -242,6 +264,8 @@ def sync_alive_desired(desired, yaml_path=DEFAULT_PATH, dry_run=False):
             if os.path.exists(temp_name):
                 os.unlink(temp_name)
         result["backup"] = str(backup)
+        if backups_pruned:
+            result["backups_pruned"] = backups_pruned
         return result
 
 

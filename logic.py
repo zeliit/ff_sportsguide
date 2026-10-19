@@ -532,6 +532,26 @@ def refresh_all_synced(force=True):
                 sources[source]["omitted"] = True
                 sources[source]["error"] = errors[source]
 
+    omitted_sources = requested_sources - usable_sources
+    if omitted_sources:
+        old = read_merged()
+        if isinstance(old, dict) and isinstance(old.get("items"), list):
+            message = "일부 소스 갱신 실패로 마지막 정상 통합 목록과 Alive를 유지합니다."
+            logger.warning(
+                "[SportsGuide] partial refresh preserved omitted=%s errors=%s",
+                sorted(omitted_sources), errors,
+            )
+            return {
+                "ret": "success", "degraded": True, "preserved": True,
+                "message": message, "sources": sources, "errors": errors,
+                "fallback_sources": sorted(fallback_sources & usable_sources),
+                "omitted_sources": sorted(omitted_sources),
+                "raw_live_count": old.get("raw_live_count", 0),
+                "duplicate_count": old.get("duplicate_count", 0),
+                "merged_live_count": old.get("live_count", 0),
+                "alive": {"ret": "preserved", "message": "기존 Alive 목록을 유지합니다."},
+            }
+
     if not usable_sources:
         old = read_merged()
         if isinstance(old, dict) and isinstance(old.get("items"), list):

@@ -41,8 +41,36 @@ def _prepend_playwright_path():
             sys.path.insert(0, value)
 
 
+def _private_playwright_version():
+    root = Path(PLAYWRIGHT_PYTHON_ROOT)
+    if not root.is_dir():
+        return ""
+    try:
+        from importlib import metadata as importlib_metadata
+        for dist in importlib_metadata.distributions(path=[str(root)]):
+            name = str(dist.metadata.get("Name") or "").lower()
+            if name == "playwright":
+                return str(dist.version or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _purge_nonprivate_playwright():
+    root = str(Path(PLAYWRIGHT_PYTHON_ROOT).resolve())
+    module = sys.modules.get("playwright")
+    location = str(getattr(module, "__file__", "") or "") if module else ""
+    if module is None or location.startswith(root + os.sep):
+        return
+    for name in list(sys.modules):
+        if name == "playwright" or name.startswith("playwright."):
+            sys.modules.pop(name, None)
+
+
 def _import_sync_playwright():
     _prepend_playwright_path()
+    if os.name != "nt":
+        _purge_nonprivate_playwright()
     try:
         from playwright.sync_api import sync_playwright
         return sync_playwright
@@ -51,45 +79,50 @@ def _import_sync_playwright():
 
 
 def _ensure_playwright():
-    """Ensure Playwright Python is importable, installing it persistently when needed."""
-    sync_playwright = _import_sync_playwright()
-    if sync_playwright is not None:
-        return sync_playwright
+    """Use a SportsGuide-private pinned Playwright runtime on Linux."""
     if os.name == "nt":
-        raise RuntimeError("Playwright가 설치되어 있지 않습니다.")
-
-    Path(PLAYWRIGHT_PYTHON_ROOT).mkdir(parents=True, exist_ok=True)
-    with locked_file(PLAYWRIGHT_INSTALL_LOCK):
-        sync_playwright = _import_sync_playwright()
-        if sync_playwright is not None:
-            return sync_playwright
-        try:
-            from .setup import P
-            P.logger.warning("[SportsGuide] Playwright Python missing; installing automatically")
-        except Exception:
-            pass
-        try:
-            result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
-                 "--no-input", "--upgrade", "--target", PLAYWRIGHT_PYTHON_ROOT,
-                 "playwright==" + PLAYWRIGHT_VERSION],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=300,
-                check=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RuntimeError("Playwright Python 자동 설치를 실행하지 못했습니다.") from exc
-        if result.returncode != 0:
-            detail = (result.stdout or "").strip().splitlines()
-            tail = detail[-1] if detail else "unknown error"
-            raise RuntimeError("Playwright Python 자동 설치에 실패했습니다: " + tail[:240])
-        importlib.invalidate_caches()
-        _prepend_playwright_path()
         sync_playwright = _import_sync_playwright()
         if sync_playwright is None:
-            raise RuntimeError("Playwright Python 자동 설치 후 모듈을 불러오지 못했습니다.")
+            raise RuntimeError("Playwright가 설치되어 있지 않습니다.")
+        return sync_playwright
+
+    Path(PLAYWRIGHT_PYTHON_ROOT).parent.mkdir(parents=True, exist_ok=True)
+    with locked_file(PLAYWRIGHT_INSTALL_LOCK):
+        installed = _private_playwright_version()
+        if installed != PLAYWRIGHT_VERSION:
+            try:
+                from .setup import P
+                P.logger.warning(
+                    "[SportsGuide] preparing private Playwright %s (current=%s)",
+                    PLAYWRIGHT_VERSION, installed or "none",
+                )
+            except Exception:
+                pass
+            shutil.rmtree(PLAYWRIGHT_PYTHON_ROOT, ignore_errors=True)
+            Path(PLAYWRIGHT_PYTHON_ROOT).mkdir(parents=True, exist_ok=True)
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+                     "--no-input", "--upgrade", "--target", PLAYWRIGHT_PYTHON_ROOT,
+                     "playwright==" + PLAYWRIGHT_VERSION],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    timeout=300,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError("Playwright Python 자동 설치를 실행하지 못했습니다.") from exc
+            if result.returncode != 0:
+                detail = (result.stdout or "").strip().splitlines()
+                tail = detail[-1] if detail else "unknown error"
+                raise RuntimeError("Playwright Python 자동 설치에 실패했습니다: " + tail[:240])
+            importlib.invalidate_caches()
+
+        _prepend_playwright_path()
+        sync_playwright = _import_sync_playwright()
+        if sync_playwright is None or _private_playwright_version() != PLAYWRIGHT_VERSION:
+            raise RuntimeError("SportsGuide 전용 Playwright 1.58.0을 불러오지 못했습니다.")
         return sync_playwright
 
 
@@ -164,6 +197,8 @@ def _browser_error_kind(message):
         "host system is missing dependencies to run browsers" in lower
         or "missing libraries" in lower
         or "playwright install-deps" in lower
+        or "error while loading shared libraries" in lower
+        or "cannot open shared object file" in lower
     ):
         return "deps"
     if (
@@ -177,7 +212,11 @@ def _browser_error_kind(message):
 
 def _browser_error_text(exc):
     text = " ".join(str(exc or "unknown error").replace("\r", " ").replace("\n", " | ").split())
-    return text[:700] or "unknown error"
+    if not text:
+        return "unknown error"
+    if len(text) <= 700:
+        return text
+    return text[:340] + " ... " + text[-340:]
 
 
 def _system_chromium_paths():
