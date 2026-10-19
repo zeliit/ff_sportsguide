@@ -12,7 +12,10 @@ from pathlib import Path
 from .storage_paths import RUNTIME_DIR, LOCK_DIR
 from .portable_lock import locked_file
 from .proxy_config import configured_list_proxy_url, browser_proxy_options
-from .b_refresh import _ensure_playwright, _launch_chromium, BROWSER_ROOT, _browser_error_text
+from .b_refresh import (
+    _ensure_playwright, _launch_chromium, BROWSER_ROOT, _browser_error_text,
+    _browser_runtime_ready_or_start, _browser_preparing_result,
+)
 from .c_stream_url import validate_root_stream_url
 from .provider_config import provider_page_url, require_provider_value
 
@@ -78,6 +81,9 @@ def refresh_c_list(force=False):
         proxy_url = configured_list_proxy_url()
         if not proxy_url:
             raise RuntimeError("중계 C 목록은 Proxy가 필요합니다. 설정에서 목록 조회 Proxy를 켜 주세요.")
+
+        if not _browser_runtime_ready_or_start():
+            return _browser_preparing_result(CACHE, "C")
 
         LOCK.parent.mkdir(parents=True, exist_ok=True)
         with locked_file(LOCK, blocking=False):

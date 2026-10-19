@@ -143,6 +143,10 @@
       timeout:960000
     }).done(function(data){
       if(data.ret === "success") {
+        if(data.preparing) {
+          if(result) { result.textContent = data.message || "브라우저를 백그라운드에서 준비 중입니다."; result.className = "small text-info mb-2"; }
+          return;
+        }
         if(result) result.textContent = "최신 C 경기 목록을 가져왔습니다. 화면을 갱신합니다...";
         location.reload();
       } else if(result) {

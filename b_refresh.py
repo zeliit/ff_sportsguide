@@ -29,6 +29,11 @@ CHROMIUM_INSTALL_LOCK = LOCK_DIR / "chromium_install.lock"
 PLAYWRIGHT_DEPS_INSTALL_LOCK = LOCK_DIR / "playwright_deps_install.lock"
 MIN_REFRESH_SECONDS = 45
 BROWSER_DIAGNOSTIC = RUNTIME_DIR / "browser_last_error.json"
+BROWSER_PREPARE_PID = RUNTIME_DIR / "browser_prepare.pid"
+BROWSER_PREPARE_STATE = RUNTIME_DIR / "browser_prepare.json"
+BROWSER_PREPARE_LOG = RUNTIME_DIR / "browser_prepare.log"
+BROWSER_PREPARE_START_LOCK = LOCK_DIR / "browser_prepare_start.lock"
+BROWSER_PREPARE_WORK_LOCK = LOCK_DIR / "browser_prepare_work.lock"
 
 
 def _prepend_playwright_path():
@@ -124,6 +129,142 @@ def _ensure_playwright():
         if sync_playwright is None or _private_playwright_version() != PLAYWRIGHT_VERSION:
             raise RuntimeError("SportsGuide 전용 Playwright 1.58.0을 불러오지 못했습니다.")
         return sync_playwright
+
+
+def _expected_browser_revision():
+    if _private_playwright_version() != PLAYWRIGHT_VERSION:
+        return ""
+    metadata = Path(PLAYWRIGHT_PYTHON_ROOT) / "playwright" / "driver" / "package" / "browsers.json"
+    try:
+        payload = json.loads(metadata.read_text(encoding="utf-8"))
+        for item in payload.get("browsers", []):
+            if item.get("name") == "chromium-headless-shell":
+                return str(item.get("revision") or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _browser_assets_ready():
+    revision = _expected_browser_revision()
+    if not revision:
+        return False
+    base = Path(BROWSER_ROOT) / ("chromium_headless_shell-" + revision)
+    if not base.is_dir():
+        return False
+    for name in ("headless_shell", "chrome-headless-shell"):
+        for candidate in base.rglob(name):
+            if candidate.is_file() and os.access(str(candidate), os.X_OK):
+                return True
+    return False
+
+
+def _prepare_pid_running():
+    try:
+        pid = int(BROWSER_PREPARE_PID.read_text(encoding="utf-8").strip())
+        if pid <= 1:
+            return False
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        try:
+            BROWSER_PREPARE_PID.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
+
+
+def _write_prepare_state(status, message="", pid=None):
+    try:
+        BROWSER_PREPARE_STATE.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "status": str(status),
+            "message": str(message or "")[:500],
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        if pid:
+            payload["pid"] = int(pid)
+        tmp = BROWSER_PREPARE_STATE.with_name(BROWSER_PREPARE_STATE.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, BROWSER_PREPARE_STATE)
+    except Exception:
+        pass
+
+
+def _start_browser_prepare(force=False):
+    """Start heavy Playwright/Chromium/dependency preparation outside FF."""
+    if os.name == "nt":
+        return False
+    if not force and _browser_assets_ready():
+        return False
+    try:
+        with locked_file(BROWSER_PREPARE_START_LOCK, blocking=False):
+            if _prepare_pid_running():
+                return False
+            if not force and _browser_assets_ready():
+                return False
+            BROWSER_PREPARE_LOG.parent.mkdir(parents=True, exist_ok=True)
+            env = os.environ.copy()
+            plugin_root = str(Path(__file__).resolve().parent.parent)
+            existing = env.get("PYTHONPATH", "")
+            env["PYTHONPATH"] = plugin_root + (os.pathsep + existing if existing else "")
+            cmd = [sys.executable, "-m", "ff_sportsguide.browser_prepare"]
+            nice = shutil.which("nice")
+            if nice:
+                cmd = [nice, "-n", "10"] + cmd
+            log_handle = BROWSER_PREPARE_LOG.open("ab", buffering=0)
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    cwd=plugin_root,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_handle,
+                    stderr=subprocess.STDOUT,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+            finally:
+                log_handle.close()
+            BROWSER_PREPARE_PID.write_text(str(proc.pid), encoding="utf-8")
+            _write_prepare_state("starting", "Playwright/Chromium 백그라운드 준비를 시작했습니다.", proc.pid)
+            return True
+    except BlockingIOError:
+        return False
+    except Exception as exc:
+        _write_prepare_state("error", "브라우저 백그라운드 준비 시작 실패: " + _browser_error_text(exc))
+        return False
+
+
+def _browser_runtime_ready_or_start():
+    if os.name == "nt":
+        return True
+    if _private_playwright_version() == PLAYWRIGHT_VERSION and _browser_assets_ready():
+        return True
+    _start_browser_prepare()
+    return False
+
+
+def _browser_preparing_result(cache_path, label):
+    message = "중계 %s 브라우저를 백그라운드에서 준비 중입니다. FF는 계속 사용할 수 있으며 기존 목록을 유지합니다." % label
+    try:
+        current = json.loads(Path(cache_path).read_text(encoding="utf-8"))
+        live = int(current.get("summary", {}).get("ING", 0))
+        age = round(max(0.0, time.time() - Path(cache_path).stat().st_mtime), 1)
+    except Exception:
+        live = 0
+        age = None
+    result = {
+        "updated": False,
+        "live": live,
+        "fallback": True,
+        "preparing": True,
+        "error": "browser preparing",
+        "message": message,
+    }
+    if age is not None:
+        result["cache_age_seconds"] = age
+    return result
 
 
 def _playwright_runtime_env():
@@ -258,31 +399,13 @@ def _launch_chromium(playwright):
         "args": ["--no-sandbox", "--disable-dev-shm-usage"] if os.name != "nt" else [],
         "timeout": 15000,
     }
-    actions = set()
     last_exc = None
-    for _ in range(3):
-        try:
-            browser = playwright.chromium.launch(**options)
-            _clear_browser_diagnostic()
-            return browser
-        except Exception as exc:
-            last_exc = exc
-            kind = _browser_error_kind(str(exc))
-            if os.name == "nt" or kind is None or kind in actions:
-                break
-            actions.add(kind)
-            try:
-                from .setup import P
-                if kind == "browser":
-                    P.logger.warning("[SportsGuide] Playwright Chromium missing; installing automatically")
-                else:
-                    P.logger.warning("[SportsGuide] Playwright Chromium OS dependencies missing; installing automatically")
-            except Exception:
-                pass
-            if kind == "browser":
-                _install_chromium()
-            else:
-                _install_browser_dependencies()
+    try:
+        browser = playwright.chromium.launch(**options)
+        _clear_browser_diagnostic()
+        return browser
+    except Exception as exc:
+        last_exc = exc
 
     system_candidates = _system_chromium_paths()
     for executable in system_candidates:
@@ -298,8 +421,19 @@ def _launch_chromium(playwright):
         except Exception as exc:
             last_exc = exc
 
+    kind = _browser_error_kind(str(last_exc))
+    if kind == "browser":
+        _start_browser_prepare()
     _save_browser_diagnostic(last_exc, system_candidates)
     detail = _browser_error_text(last_exc)
+    if kind == "deps":
+        _start_browser_prepare(force=True)
+        raise RuntimeError(
+            "Chromium OS 의존성을 백그라운드에서 준비 중입니다. FF와 기존 목록은 계속 유지됩니다: "
+            + detail
+        ) from last_exc
+    if kind == "browser":
+        raise RuntimeError("Chromium을 백그라운드에서 준비 중입니다: " + detail) from last_exc
     raise RuntimeError("Chromium 실행 실패: " + detail) from last_exc
 
 
@@ -324,6 +458,8 @@ def _cached_b_fallback(exc):
 
 def refresh_b_list(force=False):
     try:
+        if not _browser_runtime_ready_or_start():
+            return _browser_preparing_result(CACHE, "B")
         _ensure_playwright()
         LOCK.parent.mkdir(parents=True, exist_ok=True)
         with locked_file(LOCK, blocking=False):
