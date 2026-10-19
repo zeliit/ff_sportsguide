@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{% block content %}
+{% set b = arg['b_preview'] %}
+<div class="container-fluid">
+  <div class="d-flex flex-wrap align-items-center mb-2">
+    <h4 class="mb-1 mr-3">B 채널</h4>
+    <button id="b-refresh" class="btn btn-sm btn-primary mr-2" type="button">지금 갱신</button>
+  </div>
+  <div class="alert alert-info py-2 mb-2">
+    <strong>B 채널:</strong> 현재 <strong>방송 중(ING)</strong>인 경기만 표시합니다.
+  </div>
+  <p id="b-refresh-result" class="small mb-2" role="status"></p>
+  {% if b.available %}
+  <p class="small text-muted mb-2">
+    당시 방송 중 <strong>{{ b.live }}개</strong> · 수집 시각 {{ b.timestamp }}
+    · {{ b.age_minutes }}분 경과
+  </p>
+  {% if b.stale %}
+  <div class="alert alert-warning py-2">
+    이 목록은 15분 이상 지난 결과입니다. FF 서버에서 최신 방송 중 경기를 다시 수집하고 재생 버튼을 활성화합니다.
+    자동 갱신에 실패하면 위의 ‘지금 갱신’을 눌러 다시 시도해 주세요.
+  </div>
+  {% endif %}
+  {% if b['items'] %}
+  <div class="table-responsive">
+    <table class="table table-sm table-striped table-hover">
+      <thead class="thead-dark"><tr>
+        <th>리그</th><th>경기</th><th>종목</th><th>경기번호</th><th>영상번호</th><th>재생</th>
+      </tr></thead>
+      <tbody>
+      {% for item in b['items'] %}
+        <tr>
+          <td>{{ item.league | e }}</td>
+          <td class="sg-match-name" data-name="{{ item.name | e }}" data-category="{{ item.category | e }}" data-league="{{ item.league | e }}"></td>
+          <td>{{ item.category | e }}</td>
+          <td>{{ item.seq | e }}</td>
+          <td>{{ item.thumb_id | e }}</td>
+          <td>
+            {% if item.ticket %}
+            <button class="btn btn-sm btn-primary b-play" type="button"
+                    data-title="{{ item.name | e }}" data-category="{{ item.category | e }}" data-league="{{ item.league | e }}"
+                    data-stream="{{ item.stream_url | e }}">재생</button>
+            {% else %}
+            <button class="btn btn-sm btn-primary" type="button" disabled>갱신 필요</button>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p>수집 당시 방송 중인 경기가 없습니다. 예정 경기 목록은 표시하지 않습니다.</p>
+  {% endif %}
+  <p id="b-status" class="small text-muted"></p>
+  <p class="small text-muted">
+    B 영상은 FF HLS 중계를 사용합니다. FF 서버에서 직접 경기 목록을 갱신하며, 오래된 목록은 화면 진입 시 자동으로 다시 수집합니다.
+    실제 재생이 되더라도 모든 경기가 동일하게 동작하거나 장시간 안정성이 보장되는 것은 아닙니다.
+  </p>
+  {% else %}
+    <div class="alert alert-warning">B 경기 목록이 없습니다. {{ b.error | e }}</div>
+  {% endif %}
+</div>
+<form id="sg-b-play-form" action="/videojs" method="post" target="sg-b-sports-player" style="display:none">
+  <input type="hidden" name="play_title" id="sg-b-title">
+  <input type="hidden" name="play_source_src" id="sg-b-source">
+  <input type="hidden" name="play_source_type" value="application/x-mpegURL">
+</form>
+<script>
+(function(){
+
+  function sportLabel(category, league, name){
+    var categoryText = String(category || '').trim().toLowerCase();
+    var direct = {
+      'soccer':'축구','football':'축구','futsal':'풋살',
+      'basketball':'농구','volleyball':'배구','baseball':'야구',
+      'tennis':'테니스','table tennis':'탁구','badminton':'배드민턴',
+      'ice hockey':'아이스하키','hockey':'하키','golf':'골프',
+      'handball':'핸드볼','rugby':'럭비','cricket':'크리켓',
+      'boxing':'복싱','mma':'격투기','ufc':'격투기',
+      'esports':'e스포츠','e-sports':'e스포츠',
+      'snooker':'당구','billiards':'당구',
+      'motorsport':'모터스포츠','motorsports':'모터스포츠',
+      'american football':'미식축구'
+    };
+    if(direct[categoryText]) return direct[categoryText];
+
+    var text = [category, league, name].join(' ').toLowerCase();
+    var rules = [
+      ['미식축구', /\b(nfl|ncaa\s*football|american\s*football)\b|미식축구/i],
+      ['풋살', /\bfutsal\b|풋살/i],
+      ['축구', /\b(epl|premier\s*league|la\s*liga|laliga|serie\s*a|bundesliga|ligue\s*1|ucl|uefa|champions\s*league|europa\s*league|k\s*league|kleague|mls|afc|fifa|world\s*cup|soccer)\b|축구|챔피언스리그|유로파/i],
+      ['농구', /\b(nba|wnba|kbl|wkbl|euroleague|ncaa\s*basketball|basketball)\b|농구/i],
+      ['배구', /\b(kovo|v-?league|volleyball)\b|배구/i],
+      ['야구', /\b(kbo|mlb|npb|cpbl|baseball)\b|야구/i],
+      ['테니스', /\b(wta|wat|atp|itf|tennis)\b|테니스/i],
+      ['탁구', /\b(table\s*tennis|wtt)\b|탁구/i],
+      ['배드민턴', /\b(badminton|bwf)\b|배드민턴/i],
+      ['아이스하키', /\b(nhl|khl|ice\s*hockey)\b|아이스하키/i],
+      ['하키', /\bhockey\b|하키/i],
+      ['골프', /\b(pga|lpga|golf)\b|골프/i],
+      ['핸드볼', /\b(handball|ehf)\b|핸드볼/i],
+      ['럭비', /\b(rugby|six\s*nations)\b|럭비/i],
+      ['크리켓', /\b(cricket|ipl)\b|크리켓/i],
+      ['복싱', /\bboxing\b|복싱/i],
+      ['격투기', /\b(ufc|mma|one\s*championship)\b|격투기/i],
+      ['e스포츠', /\b(esports|e-sports|league\s*of\s*legends|valorant|dota|starcraft)\b|e스포츠|이스포츠/i],
+      ['당구', /\b(snooker|billiards|pool)\b|당구/i],
+      ['모터스포츠', /\b(formula\s*1|f1|motogp|nascar|motorsports?)\b|모터스포츠/i]
+    ];
+    for(var i=0;i<rules.length;i++) if(rules[i][1].test(text)) return rules[i][0];
+    return '기타';
+  }
+
+  function displayMatchName(name, category, league){
+    var raw = String(name || '').trim();
+    var label = sportLabel(category, league, raw);
+    if(!raw) return '[' + label + ']';
+    var prefix = '[' + label + ']';
+    if(raw.indexOf(prefix) === 0) return raw;
+    return prefix + ' ' + raw;
+  }
+  var refreshing = false;
+  function reloadMatches(){
+    if(refreshing) return;
+    refreshing = true;
+    var btn = document.getElementById("b-refresh");
+    var result = document.getElementById("b-refresh-result");
+    if(btn) btn.disabled = true;
+    if(result) { result.textContent = "FF 서버에서 최신 중계 B 경기 목록을 가져오는 중입니다..."; result.className = "small text-info mb-2"; }
+    $.ajax({url:"/ff_sportsguide/ajax/b_refresh",type:"POST",dataType:"json",timeout:960000})
+      .done(function(data){
+        if(data.ret === "success") {
+          if(result) result.textContent = "최신 경기 목록을 가져왔습니다. 화면을 갱신합니다...";
+          location.reload();
+        } else if(result) { result.textContent = data.message || "목록 갱신 실패"; result.className = "small text-danger mb-2"; }
+      })
+      .fail(function(xhr){
+        var data=xhr.responseJSON || {};
+        if(result) { result.textContent = data.message || "중계 B 갱신 실패. 잠시 후 다시 시도하세요. ("+xhr.status+")"; result.className = "small text-danger mb-2"; }
+      })
+      .always(function(){ refreshing = false; if(btn) btn.disabled = false; });
+  }
+  document.querySelectorAll('.sg-match-name').forEach(function(cell){
+    cell.textContent = displayMatchName(
+      cell.getAttribute('data-name'),
+      cell.getAttribute('data-category'),
+      cell.getAttribute('data-league')
+    );
+  });
+  var refreshButton = document.getElementById("b-refresh");
+  if(refreshButton) refreshButton.addEventListener("click", reloadMatches);
+  {% if b.stale or not b.available %}
+  setTimeout(reloadMatches, 500);
+  {% endif %}
+  document.querySelectorAll('.b-play').forEach(function(button){
+    button.addEventListener('click',function(){
+      var title=displayMatchName(button.getAttribute('data-title')||'스포츠 중계 B', button.getAttribute('data-category'), button.getAttribute('data-league'));
+      var url=button.getAttribute('data-stream')||'';
+      var parsed;
+      try { parsed = new URL(url, location.origin); } catch(e) { return; }
+      if(parsed.origin !== location.origin || parsed.pathname !== '/ff_sportsguide/api/b_stream.m3u8' || !parsed.searchParams.has('t'))return;
+      document.getElementById('sg-b-title').value=title;
+      document.getElementById('sg-b-source').value=parsed.href;
+      window.open('', 'sg-b-sports-player','width=980,height=580,resizable=yes');
+      document.getElementById('sg-b-play-form').submit();
+      var label=document.getElementById('b-status');
+      if(label)label.textContent=title+' — FF 플레이어를 열었습니다. 재생이 안 되면 FF 로그를 확인하세요.';
+    });
+  });
+})();
+</script>
+{% endblock %}

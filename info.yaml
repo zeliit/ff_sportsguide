@@ -1,0 +1,6 @@
+title: "스포츠 중계 현황"
+version: "0.4.12"
+package_name: "ff_sportsguide"
+developer: "zeliit"
+description: "스포츠 중계 경기 목록 / 5분 주기 자동 갱신"
+home: "https://github.com/zeliit/ff_sportsguide"

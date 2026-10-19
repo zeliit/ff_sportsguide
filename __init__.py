@@ -1,0 +1,1 @@
+# FF sports guide plugin

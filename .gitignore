@@ -1,0 +1,35 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local backups / temporary files
+*.bak
+*.bak_*
+*.bak-*
+*~
+*.tmp
+
+# Runtime data / secrets
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.log
+*.pending
+*.json
+!provider.example.json
+ff_sportsguide_proxy_secret
+provider.local.json
+provider_config.local.json
+.env
+.env.*
+
+# Built release archives
+static/*.zip
+*.zip
+
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-fluid">
+  <h4>스포츠 중계 설정</h4>
+  <div class="alert alert-secondary py-2">사이트 주소가 바뀌면 아래에서 수정하세요. 지정한 주기마다 A/B/C 경기 목록을 모두 갱신하고 통합합니다. 별도의 MediaMTX는 필요하지 않습니다.</div>
+  <form id="sports-guide-settings">
+    <div class="form-group row">
+      <label for="sg-base-url" class="col-sm-3 col-form-label">메인 URL</label>
+      <div class="col-sm-9">
+        <input id="sg-base-url" name="base_url" class="form-control" type="url" required value="{{ arg.base_url | e }}">
+        <small class="form-text text-muted">도메인 루트 주소 하나만 입력하면 A/B/C 경로에 공통 적용합니다. 공개 HTTPS 주소만 허용합니다.</small>
+      </div>
+    </div>
+    <div class="form-group row">
+      <label class="col-sm-3 col-form-label" for="sg-list-proxy">목록 조회 Proxy</label>
+      <div class="col-sm-9">
+        <div class="custom-control custom-checkbox mt-2">
+          <input class="custom-control-input" type="checkbox" id="sg-list-proxy" name="list_proxy" value="true" {% if arg.list_proxy %}checked{% endif %}>
+          <label class="custom-control-label" for="sg-list-proxy">A/B/C 경기 목록을 Proxy를 통해 조회</label>
+        </div>
+        <small class="form-text text-muted">A 사이트 목록 요청과 B/C Playwright 경기 목록 수집에 적용합니다. C 목록 조회에는 Proxy가 필요합니다. 영상 재생 Proxy와는 별도로 선택할 수 있습니다.</small>
+      </div>
+    </div>
+    <div class="form-group row">
+      <label class="col-sm-3 col-form-label" for="sg-playback-proxy">재생 시 Proxy</label>
+      <div class="col-sm-9">
+        <div class="custom-control custom-checkbox mt-2">
+          <input class="custom-control-input" type="checkbox" id="sg-playback-proxy" name="playback_proxy" value="true" {% if arg.playback_proxy %}checked{% endif %}>
+          <label class="custom-control-label" for="sg-playback-proxy">FF가 HLS 재생목록과 영상 데이터를 프록시하여 재생</label>
+        </div>
+        <small class="form-text text-muted">A: Off는 원본 직재생, On은 FF 경유 재생입니다. B는 필요한 헤더 처리를 위해 항상 FF를 경유합니다. C는 원본 특성상 FF 경유 + 설정된 Proxy를 사용합니다.</small>
+      </div>
+    </div>
+    <div class="form-group row">
+      <label class="col-sm-3 col-form-label" for="sg-upstream-proxy-url">원본 접속 Proxy URL (선택)</label>
+      <div class="col-sm-9">
+        <input class="form-control" id="sg-upstream-proxy-url" name="upstream_proxy_url" type="text" value="{{ arg.upstream_proxy_url | e }}" placeholder="http://호스트:포트">
+        <small class="form-text text-muted">형식: http://호스트:포트 — 위의 '목록 조회 Proxy'와 '재생 시 Proxy'가 이 주소를 각각 독립적으로 사용합니다. 둘 다 끄면 저장된 주소가 있어도 사용하지 않습니다.</small>
+      </div>
+    </div>
+    <div class="form-group row">
+      <label for="sg-channel-prefix" class="col-sm-3 col-form-label">채널 표시 접두어</label>
+      <div class="col-sm-9">
+        <input class="form-control" id="sg-channel-prefix" name="channel_name_prefix" type="text" maxlength="40" value="{{ arg.channel_name_prefix | e }}" placeholder="Sports">
+        <small class="form-text text-muted">Alive와 M3U에 공통 적용합니다. 예: Sports → [Sports] [NFL] 경기명. 비워두면 [NFL] 경기명처럼 접두어 없이 표시합니다.</small>
+      </div>
+    </div>
+    <div class="form-group row">
+      <label for="sg-minutes" class="col-sm-3 col-form-label">자동 갱신 주기(분)</label>
+      <div class="col-sm-3">
+        <input id="sg-minutes" name="refresh_minutes" class="form-control" type="number" min="2" max="60" required value="{{ arg.refresh_minutes | e }}">
+        <small class="form-text text-muted">이 주기마다 A/B/C를 한 번에 갱신한 뒤 중복 제거하여 Alive에 반영합니다.</small>
+      </div>
+    </div>
+    {{ macros.m_hr() }}
+    {{ macros.info_text_go_buttons('playlist_url', 'M3U', [['globalCliboardBtn','클립보드에 복사', [['text', arg['api_m3u']]]]], value=arg['api_m3u'], desc=['채널 그룹에 대한 M3U']) }}
+
+    <button id="sg-save" class="btn btn-primary" type="submit">설정 저장</button>
+    <span id="sg-result" class="ml-3" role="status"></span>
+  </form>
+</div>
+<script>
+$('#sports-guide-settings').on('submit', function(e){
+  e.preventDefault();
+  var $result=$('#sg-result').text('저장 중...');
+  $.ajax({url:'/ff_sportsguide/ajax/sports_save',type:'POST',data:$(this).serialize(),dataType:'json'})
+    .done(function(res){
+      if(res.ret==='success'){
+        $result.removeClass('text-danger').text(res.message||'저장 완료');
+      }else{$result.addClass('text-danger').text(res.message||'저장 실패');}
+    })
+    .fail(function(xhr){$result.addClass('text-danger').text((xhr.responseJSON||{}).message||'저장 실패');});
+});
+</script>
+{% endblock %}

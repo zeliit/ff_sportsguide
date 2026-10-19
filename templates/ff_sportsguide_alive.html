@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="container-fluid">
+  <h4 class="mb-3">스포츠 중계 · Alive 연동</h4>
+  <div class="alert alert-info py-2">
+    설정된 갱신 주기마다 <strong>중계 A/B/C를 모두 수집</strong>하고, 같은 경기는 자동으로 하나로 통합하여
+    <code>alive.yaml</code>의 <code>channel_source.fix_url</code>에 등록합니다.
+    종료된 경기는 세 소스가 모두 정상 갱신된 경우에만 제거합니다.
+    <strong>이 플러그인의 통합 관리 채널만 변경</strong>하며 SOOP KBO 및 직접 등록한 채널은 보존합니다.
+  </div>
+  <form id="sg-alive-settings">
+    <div class="form-group row">
+      <label class="col-sm-3 col-form-label" for="sg-alive-source">우선 중계 소스</label>
+      <div class="col-sm-9">
+        <select name="preferred_source" id="sg-alive-source" class="form-control">
+          <option value="A" {% if arg.preferred_source == "A" %}selected{% endif %}>중계 A</option>
+          <option value="B" {% if arg.preferred_source == "B" %}selected{% endif %}>중계 B</option>
+          <option value="C" {% if arg.preferred_source == "C" %}selected{% endif %}>중계 C</option>
+        </select>
+        <small class="form-text text-muted">A/B/C는 항상 모두 갱신합니다. 같은 경기가 여러 소스에 있으면 여기서 선택한 소스를 먼저 사용하고, 없으면 다른 소스로 자동 선택합니다.</small>
+      </div>
+    </div>
+    <div class="form-group row">
+      <label class="col-sm-3 col-form-label" for="sg-alive-enable">자동 동기화</label>
+      <div class="col-sm-9">
+        <div class="custom-control custom-checkbox mt-2">
+          <input class="custom-control-input" type="checkbox" id="sg-alive-enable" name="alive_enable" value="true" {% if arg.alive_enable %}checked{% endif %}>
+          <label class="custom-control-label" for="sg-alive-enable">경기 목록이 갱신될 때 Alive 채널 추가·변경·종료 채널 삭제</label>
+        </div>
+      </div>
+    </div>
+    <div class="form-group row">
+      <label class="col-sm-3 col-form-label" for="sg-alive-path">alive.yaml 경로</label>
+      <div class="col-sm-9">
+        <div class="input-group">
+          <input class="form-control" id="sg-alive-path" name="alive_yaml_path" type="text" required value="{{ arg.alive_yaml_path | e }}">
+          <div class="input-group-append">
+            <button class="btn btn-primary" type="button" id="sg-alive-path-select">경로 선택</button>
+          </div>
+        </div>
+        <small class="form-text text-muted">FF 컨테이너 내부 절대 경로 (기본 /data/db/alive.yaml)</small>
+      </div>
+    </div>
+    <div class="form-group row">
+      <label class="col-sm-3 col-form-label">현재 상태</label>
+      <div class="col-sm-9 pt-2">
+        {% if arg.alive_state.exists %}
+        <span class="text-success">파일 확인됨</span>
+        {% else %}
+        <span class="text-danger">파일을 찾을 수 없음</span>
+        {% endif %}
+        · 통합 관리 채널 <strong>{{ arg.alive_state.count }}</strong>개 · 우선 소스 <strong>{{ arg.preferred_source }}</strong>
+        {% if arg.merged_state %}
+        <div class="text-muted mt-1">
+          최근 통합: 원본 {{ arg.merged_state.raw_live_count | default(0) }}개
+          · 중복 제거 {{ arg.merged_state.duplicate_count | default(0) }}개
+          · 최종 {{ arg.merged_state.live_count | default(0) }}개
+        </div>
+        {% endif %}
+        {% if arg.alive_state.error %}<div class="text-danger">{{ arg.alive_state.error | e }}</div>{% endif %}
+      </div>
+    </div>
+    <button class="btn btn-primary" type="submit" id="sg-alive-save">설정 저장</button>
+    <button class="btn btn-primary ml-1" type="button" id="sg-alive-sync">지금 동기화</button>
+    <p id="sg-alive-result" class="mt-3 small" role="status"></p>
+  </form>
+  <div class="mt-3 text-muted small">
+    <p>채널명 형식: {% if arg.channel_name_prefix %}<code>[{{ arg.channel_name_prefix | e }}] [리그] 경기명</code>{% else %}<code>[리그] 경기명</code>{% endif %} · 접두어는 일반 설정에서 변경하며 A/B/C는 내부 우선순위와 실제 재생 소스 선택에만 사용합니다.</p>
+    <p>동일 경기의 우선 소스가 없으면 사용 가능한 다른 소스를 선택합니다. 우선순위 변경은 다음 통합 동기화부터 반영됩니다.</p>
+    <p>Proxy와 자동 갱신 주기는 <a href="/ff_sportsguide/setting">일반 설정 탭</a>에서 변경합니다.</p>
+    <p>A/B/C 중 하나라도 정상 갱신되지 않거나 목록이 오래된 경우 안전을 위해 기존 Alive 통합 채널을 삭제하지 않습니다.
+    자동 동기화를 끄면 현재 등록된 채널은 유지됩니다.</p>
+  </div>
+</div>
+<script>
+(function(){
+  var result = $('#sg-alive-result');
+
+  $('body').on('click', '#sg-alive-path-select', function(e){
+    e.preventDefault();
+    var path = $('#sg-alive-path').val().trim();
+    if (path === '') path = '/data/db/alive.yaml';
+    globalSelectLocalFile("alive.yaml 파일 선택", path, function(selected){
+      $('#sg-alive-path').val(selected);
+    });
+  });
+  $('#sg-alive-settings').on('submit',function(e){
+    e.preventDefault(); result.removeClass('text-danger text-success').text('저장 중...');
+    $('#sg-alive-save').prop('disabled',true);
+    $.ajax({url:'/ff_sportsguide/ajax/alive_save',method:'POST',data:$(this).serialize(),dataType:'json',timeout:65000})
+      .done(function(resp){result.addClass('text-success').text(resp.message||'저장 완료');})
+      .fail(function(xhr){result.addClass('text-danger').text((xhr.responseJSON||{}).message||'저장 실패');})
+      .always(function(){$('#sg-alive-save').prop('disabled',false);});
+  });
+  $('#sg-alive-sync').on('click',function(){
+    result.removeClass('text-danger text-success').text('동기화 중...');
+    $(this).prop('disabled',true);
+    $.ajax({url:'/ff_sportsguide/ajax/alive_sync',method:'POST',dataType:'json',timeout:65000})
+      .done(function(resp){
+        result.addClass('text-success').text(
+          '완료 · 원본 '+(resp.raw_live_count||0)+' · 중복 제거 '+(resp.duplicate_count||0)+
+          ' · 통합 '+(resp.merged_live_count||resp.total||0)+' · 등록 '+resp.added+
+          ' · 종료 삭제 '+resp.removed+' · 현재 '+resp.total+'개' +
+          (resp.changed?' (파일 갱신)':' (변경 없음)')
+        );
+      })
+      .fail(function(xhr){result.addClass('text-danger').text((xhr.responseJSON||{}).message||'동기화 실패');})
+      .always(function(){$('#sg-alive-sync').prop('disabled',false);});
+  });
+})();
+</script>
+{% endblock %}

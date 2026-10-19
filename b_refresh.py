@@ -1,0 +1,359 @@
+"""Server-side B listing collector. Independent from A/Alive.
+
+Uses a real Chromium engine to render the source site's public fixture iframe,
+stores only live match metadata, and atomically replaces the B-only cache.
+"""
+import importlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from .storage_paths import RUNTIME_DIR, LOCK_DIR
+from .portable_lock import locked_file
+from .proxy_config import configured_list_proxy_url, browser_proxy_options
+from .b_stream_url import validate_root_stream_url
+from .provider_config import provider_page_url, require_provider_value
+
+CACHE = RUNTIME_DIR / "b_snapshot.json"
+LOCK = LOCK_DIR / "b_refresh.lock"
+BROWSER_ROOT = "/data/browsers"
+PLAYWRIGHT_VERSION = "1.58.0"
+PLAYWRIGHT_PYTHON_ROOT = str(RUNTIME_DIR / "python")
+PLAYWRIGHT_INSTALL_LOCK = LOCK_DIR / "playwright_install.lock"
+CHROMIUM_INSTALL_LOCK = LOCK_DIR / "chromium_install.lock"
+PLAYWRIGHT_DEPS_INSTALL_LOCK = LOCK_DIR / "playwright_deps_install.lock"
+MIN_REFRESH_SECONDS = 45
+
+
+def _prepend_playwright_path():
+    if os.name == "nt":
+        return
+    root = Path(PLAYWRIGHT_PYTHON_ROOT)
+    if root.is_dir():
+        value = str(root)
+        if value not in sys.path:
+            sys.path.insert(0, value)
+
+
+def _import_sync_playwright():
+    _prepend_playwright_path()
+    try:
+        from playwright.sync_api import sync_playwright
+        return sync_playwright
+    except ImportError:
+        return None
+
+
+def _ensure_playwright():
+    """Ensure Playwright Python is importable, installing it persistently when needed."""
+    sync_playwright = _import_sync_playwright()
+    if sync_playwright is not None:
+        return sync_playwright
+    if os.name == "nt":
+        raise RuntimeError("Playwright가 설치되어 있지 않습니다.")
+
+    Path(PLAYWRIGHT_PYTHON_ROOT).mkdir(parents=True, exist_ok=True)
+    with locked_file(PLAYWRIGHT_INSTALL_LOCK):
+        sync_playwright = _import_sync_playwright()
+        if sync_playwright is not None:
+            return sync_playwright
+        try:
+            from .setup import P
+            P.logger.warning("[SportsGuide] Playwright Python missing; installing automatically")
+        except Exception:
+            pass
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "pip", "install", "--disable-pip-version-check",
+                 "--no-input", "--upgrade", "--target", PLAYWRIGHT_PYTHON_ROOT,
+                 "playwright==" + PLAYWRIGHT_VERSION],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("Playwright Python 자동 설치를 실행하지 못했습니다.") from exc
+        if result.returncode != 0:
+            detail = (result.stdout or "").strip().splitlines()
+            tail = detail[-1] if detail else "unknown error"
+            raise RuntimeError("Playwright Python 자동 설치에 실패했습니다: " + tail[:240])
+        importlib.invalidate_caches()
+        _prepend_playwright_path()
+        sync_playwright = _import_sync_playwright()
+        if sync_playwright is None:
+            raise RuntimeError("Playwright Python 자동 설치 후 모듈을 불러오지 못했습니다.")
+        return sync_playwright
+
+
+def _playwright_runtime_env():
+    env = os.environ.copy()
+    env["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_ROOT
+    runtime_path = str(Path(PLAYWRIGHT_PYTHON_ROOT))
+    existing = env.get("PYTHONPATH", "")
+    if Path(runtime_path).is_dir():
+        env["PYTHONPATH"] = runtime_path + (os.pathsep + existing if existing else "")
+    return env
+
+
+def _install_chromium():
+    """Install the Playwright Chromium build into persistent /data storage."""
+    if os.name == "nt":
+        return
+    _ensure_playwright()
+    Path(BROWSER_ROOT).mkdir(parents=True, exist_ok=True)
+    with locked_file(CHROMIUM_INSTALL_LOCK):
+        env = _playwright_runtime_env()
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "playwright", "install", "chromium"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=420,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("Playwright Chromium 자동 설치를 실행하지 못했습니다.") from exc
+        if result.returncode != 0:
+            detail = (result.stdout or "").strip().splitlines()
+            tail = detail[-1] if detail else "unknown error"
+            raise RuntimeError("Playwright Chromium 자동 설치에 실패했습니다: " + tail[:240])
+
+
+def _install_browser_dependencies():
+    """Install OS packages required by Playwright Chromium when the container permits it."""
+    if os.name == "nt":
+        return
+    if hasattr(os, "geteuid") and os.geteuid() != 0:
+        raise RuntimeError(
+            "Playwright Chromium 시스템 의존성 자동 설치에는 FF 컨테이너의 root 권한이 필요합니다."
+        )
+    _ensure_playwright()
+    with locked_file(PLAYWRIGHT_DEPS_INSTALL_LOCK):
+        env = _playwright_runtime_env()
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "playwright", "install-deps", "chromium"],
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                timeout=900,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError("Playwright Chromium 시스템 의존성 자동 설치를 실행하지 못했습니다.") from exc
+        if result.returncode != 0:
+            lines = (result.stdout or "").strip().splitlines()
+            tail = " | ".join(lines[-4:]) if lines else "unknown error"
+            raise RuntimeError("Playwright Chromium 시스템 의존성 자동 설치에 실패했습니다: " + tail[:400])
+
+
+def _browser_error_kind(message):
+    lower = str(message or "").lower()
+    if (
+        "host system is missing dependencies to run browsers" in lower
+        or "missing libraries" in lower
+        or "playwright install-deps" in lower
+    ):
+        return "deps"
+    if (
+        "executable doesn't exist" in lower
+        or "browser executable" in lower
+        or "please run the following command to download new browsers" in lower
+    ):
+        return "browser"
+    return None
+
+
+def _launch_chromium(playwright):
+    options = {
+        "headless": True,
+        "args": ["--no-sandbox", "--disable-dev-shm-usage"] if os.name != "nt" else [],
+        "timeout": 15000,
+    }
+    actions = set()
+    last_exc = None
+    for _ in range(3):
+        try:
+            return playwright.chromium.launch(**options)
+        except Exception as exc:
+            last_exc = exc
+            kind = _browser_error_kind(str(exc))
+            if os.name == "nt" or kind is None or kind in actions:
+                break
+            actions.add(kind)
+            try:
+                from .setup import P
+                if kind == "browser":
+                    P.logger.warning("[SportsGuide] Playwright Chromium missing; installing automatically")
+                else:
+                    P.logger.warning("[SportsGuide] Playwright Chromium OS dependencies missing; installing automatically")
+            except Exception:
+                pass
+            if kind == "browser":
+                _install_chromium()
+            else:
+                _install_browser_dependencies()
+    raise RuntimeError(
+        "Chromium 자동 준비 후에도 실행하지 못했습니다. FF 컨테이너의 Playwright/OS 의존성을 확인해 주세요."
+    ) from last_exc
+
+
+def refresh_b_list(force=False):
+    _ensure_playwright()
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with locked_file(LOCK, blocking=False):
+            if CACHE.exists() and not force:
+                age = time.time() - CACHE.stat().st_mtime
+                current = json.loads(CACHE.read_text(encoding="utf-8"))
+                if age < MIN_REFRESH_SECONDS and current.get("sourceUrl") == provider_page_url("b"):
+                    return {"updated": False, "live": int(current.get("summary", {}).get("ING", 0)),
+                            "message": "방금 갱신한 목록을 사용합니다."}
+            payload = _collect_b()
+            current_path = CACHE.with_name(CACHE.name + ".tmp." + str(os.getpid()))
+            try:
+                current_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+                os.replace(current_path, CACHE)
+            finally:
+                current_path.unlink(missing_ok=True)
+            return {"updated": True, "live": payload["summary"]["ING"],
+                    "message": "중계 B 방송 중 경기 목록을 갱신했습니다."}
+    except BlockingIOError as exc:
+        raise RuntimeError("중계 B 목록 갱신이 이미 진행 중입니다. 잠시 후 다시 시도하세요.") from exc
+
+
+def _collect_b():
+    sync_playwright = _ensure_playwright()
+    # Browser assets are mounted on /data and survive FF container restart.
+    # Recreating the container may still require OS shared libraries.
+    if os.name != "nt":
+        os.environ["PLAYWRIGHT_BROWSERS_PATH"] = BROWSER_ROOT
+    page_url = provider_page_url("b")
+    frame_match = require_provider_value("b_frame_match")
+    start = time.monotonic()
+    with sync_playwright() as playwright:
+        browser = _launch_chromium(playwright)
+        try:
+            context_options = {"viewport": {"width": 1280, "height": 850}}
+            proxy = browser_proxy_options(configured_list_proxy_url())
+            if proxy:
+                context_options["proxy"] = proxy
+            context = browser.new_context(**context_options)
+            page = context.new_page()
+            page.set_default_timeout(6000)
+            page.goto(page_url, wait_until="domcontentloaded", timeout=25000)
+            frame = None
+            for _ in range(24):
+                frame = next((f for f in page.frames if frame_match in f.url), None)
+                if frame is not None:
+                    rows = frame.locator("tr[seq]")
+                    if rows.count() > 0:
+                        break
+                page.wait_for_timeout(600)
+            if frame is None or frame.locator("tr[seq]").count() == 0:
+                raise RuntimeError("중계 B 경기 목록이 브라우저에서 로드되지 않았습니다.")
+
+            items = frame.evaluate("""async () => {
+              const hexBytes = value => {
+                const out = new Uint8Array(value.length / 2);
+                for (let i = 0; i < out.length; i++) out[i] = parseInt(value.substr(i * 2, 2), 16);
+                return out;
+              };
+              const decryptPlayerV = async value => {
+                if (!/^[0-9a-f]+$/i.test(value) || value.length < 64 || value.length % 2 !== 0)
+                  throw new Error('invalid player token');
+                const iv = new TextEncoder().encode(value.slice(0, 16));
+                const keyRaw = new TextEncoder().encode(value.slice(-16));
+                const cipher = hexBytes(value.slice(16, -16));
+                const key = await crypto.subtle.importKey('raw', keyRaw, {name: 'AES-CBC'}, false, ['decrypt']);
+                const plain = await crypto.subtle.decrypt({name: 'AES-CBC', iv}, key, cipher);
+                return new TextDecoder().decode(plain).replace(/[\x00-\x1f]+$/g, '');
+              };
+              const result = [];
+              for (const tr of Array.from(document.querySelectorAll('tr[seq]'))) {
+                const thumb = tr.querySelector('.thumb img')?.getAttribute('src') || '';
+                const m = thumb.match(/\/thumbnails\/(\d{1,8})(?:\D|$)/);
+                const state = tr.getAttribute('states') || '';
+                let streamUrl = '';
+                let streamError = '';
+                if (state === 'ING') {
+                  try {
+                    const anchor = tr.querySelector('a[onclick^="openVideo"]');
+                    if (!anchor) throw new Error('missing live feed');
+                    const encrypted = anchor.getAttribute('data') || '';
+                    const html = getDecryptData(encrypted);
+                    const holder = document.createElement('div');
+                    holder.innerHTML = html;
+                    const playerUrl = holder.querySelector('iframe')?.getAttribute('src') || '';
+                    const token = new URL(playerUrl, location.href).searchParams.get('v') || '';
+                    streamUrl = await decryptPlayerV(token);
+                  } catch (error) {
+                    streamError = String(error).slice(0, 180);
+                  }
+                }
+                result.push({
+                  seq: tr.getAttribute('seq') || '',
+                  state,
+                  sourceType: tr.getAttribute('sourcetype') || '',
+                  category: tr.getAttribute('cate') || '',
+                  league: tr.querySelector('.league_name')?.innerText?.trim() || '',
+                  name: tr.querySelector('.subject')?.innerText?.trim() || '',
+                  thumbId: m ? m[1] : '',
+                  feeds: tr.querySelectorAll('a[onclick^="openVideo"]').length,
+                  streamUrl,
+                  streamError,
+                });
+              }
+              return result;
+            }""")
+            if not isinstance(items, list) or not items:
+                raise RuntimeError("중계 B 경기 목록 파싱 결과가 없습니다.")
+            valid_states = [x for x in items if x.get("state") in ("ING", "PREP")]
+            if not valid_states:
+                raise RuntimeError("중계 B 경기 상태 확인에 실패했습니다.")
+            live = []
+            for item in valid_states:
+                if item["state"] != "ING":
+                    continue
+                if not re.fullmatch(r"[0-9]{1,10}", str(item.get("seq") or "")):
+                    raise RuntimeError("Live B fixture ID invalid; retaining old list")
+                if not re.fullmatch(r"[0-9]{1,8}", str(item.get("thumbId") or "")):
+                    raise RuntimeError("Live B media ID invalid; retaining old list")
+                try:
+                    stream_url, stream_id = validate_root_stream_url(item.get("streamUrl"), str(item["seq"]))
+                except ValueError as exc:
+                    detail = str(item.get("streamError") or exc)[:160]
+                    raise RuntimeError("Live B stream URL invalid; retaining old list: " + detail) from exc
+                live.append({
+                    "seq": str(item["seq"]),
+                    "state": "ING",
+                    "sourceType": str(item.get("sourceType") or "")[:10],
+                    "league": str(item.get("league") or "")[:90],
+                    "name": str(item.get("name") or "")[:180],
+                    "category": str(item.get("category") or "")[:40],
+                    "thumbId": str(item["thumbId"]),
+                    "streamId": stream_id,
+                    "streamUrl": stream_url,
+                    "feeds": min(10, int(item.get("feeds") or 0)),
+                })
+            return {
+                "source": "스포츠 중계 B",
+                "sourceUrl": page_url,
+                "fetchedAt": datetime.now(timezone.utc).isoformat(),
+                "method": "FF server Chromium + player token decrypt",
+                "summary": {"ING": len(live), "PREP": 0},
+                "domRowCount": len(items),
+                "items": live,
+                "elapsedSeconds": round(time.monotonic() - start, 1),
+            }
+        finally:
+            browser.close()
