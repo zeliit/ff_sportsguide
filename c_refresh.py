@@ -12,7 +12,7 @@ from pathlib import Path
 from .storage_paths import RUNTIME_DIR, LOCK_DIR
 from .portable_lock import locked_file
 from .proxy_config import configured_list_proxy_url, browser_proxy_options
-from .b_refresh import _ensure_playwright, _launch_chromium, BROWSER_ROOT
+from .b_refresh import _ensure_playwright, _launch_chromium, BROWSER_ROOT, _browser_error_text
 from .c_stream_url import validate_root_stream_url
 from .provider_config import provider_page_url, require_provider_value
 
@@ -54,13 +54,32 @@ def _valid_referer(value):
     return url
 
 
-def refresh_c_list(force=False):
-    proxy_url = configured_list_proxy_url()
-    if not proxy_url:
-        raise RuntimeError("중계 C 목록은 Proxy가 필요합니다. 설정에서 목록 조회 Proxy를 켜 주세요.")
-
-    LOCK.parent.mkdir(parents=True, exist_ok=True)
+def _cached_c_fallback(exc):
     try:
+        current = json.loads(CACHE.read_text(encoding="utf-8"))
+        if not isinstance(current, dict) or not isinstance(current.get("summary"), dict):
+            return None
+        live = int(current.get("summary", {}).get("ING", 0))
+        detail = _browser_error_text(exc)
+        return {
+            "updated": False,
+            "live": live,
+            "fallback": True,
+            "error": detail,
+            "cache_age_seconds": round(max(0.0, time.time() - CACHE.stat().st_mtime), 1),
+            "message": "중계 C 갱신 실패 - 이전 정상 캐시를 사용합니다: " + detail[:220],
+        }
+    except Exception:
+        return None
+
+
+def refresh_c_list(force=False):
+    try:
+        proxy_url = configured_list_proxy_url()
+        if not proxy_url:
+            raise RuntimeError("중계 C 목록은 Proxy가 필요합니다. 설정에서 목록 조회 Proxy를 켜 주세요.")
+
+        LOCK.parent.mkdir(parents=True, exist_ok=True)
         with locked_file(LOCK, blocking=False):
             if CACHE.exists() and not force:
                 age = time.time() - CACHE.stat().st_mtime
@@ -85,7 +104,20 @@ def refresh_c_list(force=False):
                 "message": "중계 C 방송 중 경기 목록을 갱신했습니다.",
             }
     except BlockingIOError as exc:
+        fallback = _cached_c_fallback(exc)
+        if fallback is not None:
+            return fallback
         raise RuntimeError("중계 C 목록 갱신이 이미 진행 중입니다. 잠시 후 다시 시도하세요.") from exc
+    except Exception as exc:
+        fallback = _cached_c_fallback(exc)
+        if fallback is not None:
+            try:
+                from .setup import P
+                P.logger.warning("[SportsGuide C] refresh failed; using previous cache: %s", _browser_error_text(exc))
+            except Exception:
+                pass
+            return fallback
+        raise
 
 
 def _collect_c(proxy_url):

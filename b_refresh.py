@@ -7,6 +7,7 @@ import importlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -27,6 +28,7 @@ PLAYWRIGHT_INSTALL_LOCK = LOCK_DIR / "playwright_install.lock"
 CHROMIUM_INSTALL_LOCK = LOCK_DIR / "chromium_install.lock"
 PLAYWRIGHT_DEPS_INSTALL_LOCK = LOCK_DIR / "playwright_deps_install.lock"
 MIN_REFRESH_SECONDS = 45
+BROWSER_DIAGNOSTIC = RUNTIME_DIR / "browser_last_error.json"
 
 
 def _prepend_playwright_path():
@@ -173,6 +175,44 @@ def _browser_error_kind(message):
     return None
 
 
+def _browser_error_text(exc):
+    text = " ".join(str(exc or "unknown error").replace("\r", " ").replace("\n", " | ").split())
+    return text[:700] or "unknown error"
+
+
+def _system_chromium_paths():
+    if os.name == "nt":
+        return []
+    found = []
+    for name in ("chromium", "chromium-browser", "google-chrome", "google-chrome-stable", "chrome"):
+        path = shutil.which(name)
+        if path and path not in found:
+            found.append(path)
+    return found
+
+
+def _save_browser_diagnostic(exc, system_candidates=None):
+    try:
+        BROWSER_DIAGNOSTIC.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "error": _browser_error_text(exc),
+            "system_candidates": list(system_candidates or []),
+        }
+        tmp = BROWSER_DIAGNOSTIC.with_name(BROWSER_DIAGNOSTIC.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, BROWSER_DIAGNOSTIC)
+    except Exception:
+        pass
+
+
+def _clear_browser_diagnostic():
+    try:
+        BROWSER_DIAGNOSTIC.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _launch_chromium(playwright):
     options = {
         "headless": True,
@@ -183,7 +223,9 @@ def _launch_chromium(playwright):
     last_exc = None
     for _ in range(3):
         try:
-            return playwright.chromium.launch(**options)
+            browser = playwright.chromium.launch(**options)
+            _clear_browser_diagnostic()
+            return browser
         except Exception as exc:
             last_exc = exc
             kind = _browser_error_kind(str(exc))
@@ -202,15 +244,49 @@ def _launch_chromium(playwright):
                 _install_chromium()
             else:
                 _install_browser_dependencies()
-    raise RuntimeError(
-        "Chromium 자동 준비 후에도 실행하지 못했습니다. FF 컨테이너의 Playwright/OS 의존성을 확인해 주세요."
-    ) from last_exc
+
+    system_candidates = _system_chromium_paths()
+    for executable in system_candidates:
+        try:
+            browser = playwright.chromium.launch(executable_path=executable, **options)
+            try:
+                from .setup import P
+                P.logger.warning("[SportsGuide] bundled Chromium failed; using system browser: %s", executable)
+            except Exception:
+                pass
+            _clear_browser_diagnostic()
+            return browser
+        except Exception as exc:
+            last_exc = exc
+
+    _save_browser_diagnostic(last_exc, system_candidates)
+    detail = _browser_error_text(last_exc)
+    raise RuntimeError("Chromium 실행 실패: " + detail) from last_exc
+
+
+def _cached_b_fallback(exc):
+    try:
+        current = json.loads(CACHE.read_text(encoding="utf-8"))
+        if not isinstance(current, dict) or not isinstance(current.get("summary"), dict):
+            return None
+        live = int(current.get("summary", {}).get("ING", 0))
+        detail = _browser_error_text(exc)
+        return {
+            "updated": False,
+            "live": live,
+            "fallback": True,
+            "error": detail,
+            "cache_age_seconds": round(max(0.0, time.time() - CACHE.stat().st_mtime), 1),
+            "message": "중계 B 갱신 실패 - 이전 정상 캐시를 사용합니다: " + detail[:220],
+        }
+    except Exception:
+        return None
 
 
 def refresh_b_list(force=False):
-    _ensure_playwright()
-    LOCK.parent.mkdir(parents=True, exist_ok=True)
     try:
+        _ensure_playwright()
+        LOCK.parent.mkdir(parents=True, exist_ok=True)
         with locked_file(LOCK, blocking=False):
             if CACHE.exists() and not force:
                 age = time.time() - CACHE.stat().st_mtime
@@ -228,7 +304,20 @@ def refresh_b_list(force=False):
             return {"updated": True, "live": payload["summary"]["ING"],
                     "message": "중계 B 방송 중 경기 목록을 갱신했습니다."}
     except BlockingIOError as exc:
+        fallback = _cached_b_fallback(exc)
+        if fallback is not None:
+            return fallback
         raise RuntimeError("중계 B 목록 갱신이 이미 진행 중입니다. 잠시 후 다시 시도하세요.") from exc
+    except Exception as exc:
+        fallback = _cached_b_fallback(exc)
+        if fallback is not None:
+            try:
+                from .setup import P
+                P.logger.warning("[SportsGuide B] refresh failed; using previous cache: %s", _browser_error_text(exc))
+            except Exception:
+                pass
+            return fallback
+        raise
 
 
 def _collect_b():

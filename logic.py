@@ -297,13 +297,23 @@ def _merged_alive_desired(merged):
         key = str(item.get("key") or "")
         ident = str(item.get("selected_id") or "")
         if not re.fullmatch(r"sgu_[0-9a-f]{12}", key):
-            raise ValueError("통합 경기 키 형식이 올바르지 않습니다.")
-        url = _merged_item_url(item)
+            logger.warning("[SportsGuide] Alive item skipped: invalid key=%s", key[:40])
+            continue
+        try:
+            url = _merged_item_url(item)
+        except Exception as exc:
+            logger.warning(
+                "[SportsGuide] Alive item skipped key=%s source=%s id=%s: %s",
+                key, item.get("chosen_source"), ident[:30], exc,
+            )
+            continue
 
         league = " ".join(str(item.get("league") or "").split()).replace("\x00", "")[:100]
         title = " ".join(str(item.get("title") or ident).split()).replace("\x00", "")[:180]
         name = _format_channel_name(league, title)
         desired[key] = {"name": name, "url": url}
+    if merged["items"] and not desired:
+        raise ValueError("통합 경기의 재생 URL을 하나도 생성하지 못했습니다.")
     return desired
 
 
@@ -413,29 +423,31 @@ def _refresh_after_settings_save():
         logger.exception("[SportsGuide] background refresh after settings save failed")
 
 
-def _sync_current_if_ready():
+def _sync_current_if_ready(fallback_sources=None):
     if not _alive_enabled():
         return {"ret": "skipped", "message": "Alive integration is off"}
+    fallback = {str(x).upper() for x in (fallback_sources or ())}
     try:
-        merged = build_merged(_selected_source(), enabled_sources=_enabled_sources())
+        merged = build_merged(
+            _selected_source(),
+            enabled_sources=_enabled_sources(),
+            allow_stale_sources=fallback,
+        )
         save_merged(merged)
         return run_alive_sync(merged=merged)
     except Exception as exc:
-        # A manual single-source refresh must never delete channels while the
-        # other source snapshots are stale or invalid.
         logger.info("[SportsGuide] merged sync deferred: %s", exc)
         return {"ret": "skipped", "message": str(exc)[:180]}
 
-
 def refresh_b_synced(force=False):
     result = refresh_b_list(force=force)
-    return {**result, "alive": _sync_current_if_ready()}
-
+    fallback = {"B"} if result.get("fallback") else set()
+    return {**result, "alive": _sync_current_if_ready(fallback_sources=fallback)}
 
 def refresh_c_synced(force=False):
     result = refresh_c_list(force=force)
-    return {**result, "alive": _sync_current_if_ready()}
-
+    fallback = {"C"} if result.get("fallback") else set()
+    return {**result, "alive": _sync_current_if_ready(fallback_sources=fallback)}
 
 def refresh(force=False):
     CACHE.parent.mkdir(parents=True, exist_ok=True)
@@ -470,59 +482,124 @@ def refresh_all_synced(force=True):
     _last_all_attempt_ts = time.time()
     errors = {}
     sources = {}
-    enabled_sources = _enabled_sources()
+    fallback_sources = set()
+    requested_sources = set(_enabled_sources())
 
     a = refresh(force=force)
     sources["A"] = {"live": int(a.get("live_count") or 0)}
     if a.get("last_error"):
-        errors["A"] = str(a.get("last_error"))[:160]
+        errors["A"] = str(a.get("last_error"))[:240]
+        fallback_sources.add("A")
+        sources["A"]["fallback"] = True
 
     try:
         b = refresh_b_list(force=force)
-        sources["B"] = {"live": int(b.get("live") or 0)}
+        sources["B"] = {"live": int(b.get("live") or 0), "fallback": bool(b.get("fallback"))}
+        if b.get("fallback"):
+            fallback_sources.add("B")
+            errors["B"] = str(b.get("error") or b.get("message") or "B refresh failed")[:240]
+            sources["B"]["cache_age_seconds"] = b.get("cache_age_seconds")
     except Exception as exc:
-        errors["B"] = str(exc)[:160]
+        errors["B"] = str(exc)[:240]
+        sources["B"] = {"live": 0, "error": errors["B"]}
 
-    if "C" in enabled_sources:
+    if "C" in requested_sources:
         try:
             c = refresh_c_list(force=force)
-            sources["C"] = {"live": int(c.get("live") or 0)}
+            sources["C"] = {"live": int(c.get("live") or 0), "fallback": bool(c.get("fallback"))}
+            if c.get("fallback"):
+                fallback_sources.add("C")
+                errors["C"] = str(c.get("error") or c.get("message") or "C refresh failed")[:240]
+                sources["C"]["cache_age_seconds"] = c.get("cache_age_seconds")
         except Exception as exc:
-            errors["C"] = str(exc)[:160]
+            errors["C"] = str(exc)[:240]
+            sources["C"] = {"live": 0, "error": errors["C"]}
     else:
         sources["C"] = {"live": 0, "skipped": True, "reason": "proxy_not_configured"}
 
-    if errors:
-        message = " / ".join(f"{k}: {v}" for k, v in errors.items())
-        logger.warning("[SportsGuide] A/B/C refresh incomplete; Alive preserved: %s", message)
-        return {"ret": "error", "message": message, "sources": sources}
+    usable_sources = set()
+    for source in sorted(requested_sources):
+        try:
+            build_merged(
+                _selected_source(),
+                enabled_sources=(source,),
+                allow_stale_sources=({source} if source in fallback_sources else ()),
+            )
+            usable_sources.add(source)
+        except Exception as exc:
+            errors.setdefault(source, str(exc)[:240])
+            if source in sources:
+                sources[source]["omitted"] = True
+                sources[source]["error"] = errors[source]
+
+    if not usable_sources:
+        old = read_merged()
+        if isinstance(old, dict) and isinstance(old.get("items"), list):
+            message = "모든 소스 갱신에 실패해 마지막 통합 캐시를 유지합니다."
+            logger.warning("[SportsGuide] %s errors=%s", message, errors)
+            return {
+                "ret": "success", "degraded": True, "preserved": True,
+                "message": message, "sources": sources, "errors": errors,
+                "raw_live_count": old.get("raw_live_count", 0),
+                "duplicate_count": old.get("duplicate_count", 0),
+                "merged_live_count": old.get("live_count", 0),
+                "alive": {"ret": "preserved", "message": "기존 Alive 목록을 유지합니다."},
+            }
+        return {
+            "ret": "error", "message": "사용 가능한 중계 소스와 이전 통합 캐시가 없습니다.",
+            "sources": sources, "errors": errors,
+        }
 
     try:
-        merged = build_merged(_selected_source(), enabled_sources=enabled_sources)
+        merged = build_merged(
+            _selected_source(),
+            enabled_sources=usable_sources,
+            allow_stale_sources=fallback_sources & usable_sources,
+        )
+        degraded = bool(errors or (fallback_sources & usable_sources) or (usable_sources != requested_sources))
+        merged["degraded"] = degraded
+        merged["fallback_sources"] = sorted(fallback_sources & usable_sources)
+        merged["omitted_sources"] = sorted(requested_sources - usable_sources)
+        merged["source_errors"] = errors
         save_merged(merged)
     except Exception as exc:
-        logger.warning("[SportsGuide] merge failed; Alive preserved: %s", exc)
-        return {"ret": "error", "message": str(exc)[:180], "sources": sources}
+        old = read_merged()
+        if isinstance(old, dict) and isinstance(old.get("items"), list):
+            logger.warning("[SportsGuide] merge failed; last merged cache preserved: %s", exc)
+            return {
+                "ret": "success", "degraded": True, "preserved": True,
+                "message": "통합 처리 실패로 마지막 통합 캐시를 유지합니다.",
+                "sources": sources, "errors": {**errors, "MERGE": str(exc)[:240]},
+                "raw_live_count": old.get("raw_live_count", 0),
+                "duplicate_count": old.get("duplicate_count", 0),
+                "merged_live_count": old.get("live_count", 0),
+                "alive": {"ret": "preserved", "message": "기존 Alive 목록을 유지합니다."},
+            }
+        return {"ret": "error", "message": str(exc)[:240], "sources": sources, "errors": errors}
 
     alive = run_alive_sync(merged=merged) if _alive_enabled() else {
         "ret": "skipped", "message": "Alive integration is off"
     }
-    logger.info(
-        "[SportsGuide] A/B/C refreshed raw=%s duplicate=%s merged=%s priority=%s",
-        merged.get("raw_live_count", 0),
-        merged.get("duplicate_count", 0),
-        merged.get("live_count", 0),
-        _selected_source(),
+    log_method = logger.warning if merged.get("degraded") else logger.info
+    log_method(
+        "[SportsGuide] A/B/C refreshed raw=%s duplicate=%s merged=%s priority=%s fallback=%s omitted=%s",
+        merged.get("raw_live_count", 0), merged.get("duplicate_count", 0),
+        merged.get("live_count", 0), _selected_source(),
+        merged.get("fallback_sources", []), merged.get("omitted_sources", []),
     )
     return {
         "ret": "success",
+        "degraded": bool(merged.get("degraded")),
+        "message": "일부 소스는 이전 정상 캐시를 사용 중입니다." if merged.get("degraded") else "갱신 완료",
         "sources": sources,
+        "errors": errors,
+        "fallback_sources": merged.get("fallback_sources", []),
+        "omitted_sources": merged.get("omitted_sources", []),
         "raw_live_count": merged.get("raw_live_count", 0),
         "duplicate_count": merged.get("duplicate_count", 0),
         "merged_live_count": merged.get("live_count", 0),
         "alive": alive,
     }
-
 
 def refresh_selected_now():
     result = refresh_all_synced(force=True)
@@ -593,29 +670,41 @@ def _stream_link(channel):
 def playlist():
     if not provider_configured():
         return Response("#EXTM3U\n", content_type="audio/x-mpegurl")
-    # Use the same A/B/C merged + de-duplicated selection that Alive uses.
-    # If a refresh temporarily fails, keep serving the last successful merged set,
-    # matching Alive's preserve-on-failure behavior.
+
     data = read_merged()
     if not data or not isinstance(data.get("items"), list):
-        data = build_merged(_selected_source(), enabled_sources=_enabled_sources())
-        save_merged(data)
+        try:
+            data = build_merged(_selected_source(), enabled_sources=_enabled_sources())
+            save_merged(data)
+        except Exception as exc:
+            logger.warning("[SportsGuide] M3U build failed; serving empty/previous cache: %s", exc)
+            data = read_merged()
+
+    if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+        return Response("#EXTM3U\n", content_type="audio/x-mpegurl")
 
     entries = ["#EXTM3U"]
     for item in data.get("items", []):
         key = str(item.get("key") or "")
         if not re.fullmatch(r"sgu_[0-9a-f]{12}", key):
+            logger.warning("[SportsGuide] M3U item skipped: invalid key=%s", key[:40])
             continue
-        sport = " ".join(str(item.get("sport") or "기타").split()).replace('"', "'").replace("\n", " ")[:40]
-        title = " ".join(str(item.get("title") or item.get("selected_id") or key).split()).replace('"', "'").replace("\n", " ")[:180]
-        league = " ".join(str(item.get("league") or "").split()).replace('"', "'").replace("\n", " ")[:100]
-        group = league or sport
-        name = _format_channel_name(league, title)
-        url = _merged_item_url(item)
-        entries.append(f'#EXTINF:-1 tvg-id="{key}" group-title="{group}",{name}')
-        entries.append(url)
+        try:
+            sport = " ".join(str(item.get("sport") or "기타").split()).replace('"', "'").replace("\n", " ")[:40]
+            title = " ".join(str(item.get("title") or item.get("selected_id") or key).split()).replace('"', "'").replace("\n", " ")[:180]
+            league = " ".join(str(item.get("league") or "").split()).replace('"', "'").replace("\n", " ")[:100]
+            group = league or sport
+            name = _format_channel_name(league, title)
+            url = _merged_item_url(item)
+            entries.append(f'#EXTINF:-1 tvg-id="{key}" group-title="{group}",{name}')
+            entries.append(url)
+        except Exception as exc:
+            logger.warning(
+                "[SportsGuide] M3U item skipped key=%s source=%s id=%s: %s",
+                key, item.get("chosen_source"), str(item.get("selected_id") or "")[:30], exc,
+            )
+            continue
     return Response("\n".join(entries) + "\n", content_type="audio/x-mpegurl")
-
 
 class Logic(PluginModuleBase):
     db_default = {

@@ -17,6 +17,7 @@ A_CACHE = RUNTIME_DIR / "channels.json"
 B_CACHE = RUNTIME_DIR / "b_snapshot.json"
 C_CACHE = RUNTIME_DIR / "c_snapshot.json"
 MAX_AGE = 15 * 60
+FALLBACK_MAX_AGE = 6 * 60 * 60
 
 SPORT_MAP = {
     "축구": "축구", "soccer": "축구", "football": "축구",
@@ -221,11 +222,12 @@ def _source_event(source, ident, title, category, league="", start_time="", extr
     }
 
 
-def load_sources(enabled_sources=None):
+def load_sources(enabled_sources=None, allow_stale_sources=None):
     enabled = {str(x).upper() for x in (enabled_sources or ("A", "B", "C"))}
     enabled &= {"A", "B", "C"}
     if not enabled:
         raise ValueError("활성화된 중계 소스가 없습니다.")
+    allow_stale = {str(x).upper() for x in (allow_stale_sources or ())} & enabled
 
     now = time.time()
     status = {}
@@ -234,7 +236,13 @@ def load_sources(enabled_sources=None):
     if "A" in enabled:
         a = json.loads(A_CACHE.read_text(encoding="utf-8"))
         a_age = now - float(a.get("fetched_ts") or 0)
-        if a.get("last_error") or not -60 < a_age <= MAX_AGE or int(a.get("rows_total") or 0) <= 0:
+        a_fallback = "A" in allow_stale
+        if int(a.get("rows_total") or 0) <= 0:
+            raise ValueError("A 목록 데이터가 없습니다.")
+        if a_fallback:
+            if not -60 < a_age <= FALLBACK_MAX_AGE:
+                raise ValueError("A 이전 정상 캐시가 너무 오래되었습니다.")
+        elif a.get("last_error") or not -60 < a_age <= MAX_AGE:
             raise ValueError("A 목록이 오래되었거나 조회 오류가 있습니다.")
         for x in a.get("channels", []):
             if x.get("status") != "방송 중":
@@ -246,14 +254,21 @@ def load_sources(enabled_sources=None):
                 "A", ch, x.get("program"), x.get("category"), x.get("league"), x.get("start_time"),
                 {"channel": ch},
             ))
-        status["A"] = {"live": len([x for x in events if x["source"] == "A"]), "age": round(a_age, 1)}
+        status["A"] = {"live": len([x for x in events if x["source"] == "A"]), "age": round(a_age, 1),
+                       "fallback": a_fallback, "stale": a_age > MAX_AGE or bool(a.get("last_error"))}
 
     if "B" in enabled:
         b_raw = json.loads(B_CACHE.read_text(encoding="utf-8"))
         b_dt = _dt(b_raw.get("fetchedAt"))
         b_age = now - b_dt.timestamp()
         b = read_b_preview()
-        if not b.get("available") or b.get("stale") or not -60 < b_age <= MAX_AGE or int(b_raw.get("domRowCount") or 0) <= 0:
+        b_fallback = "B" in allow_stale
+        if not b.get("available") or int(b_raw.get("domRowCount") or 0) <= 0:
+            raise ValueError("B 목록 데이터가 없습니다.")
+        if b_fallback:
+            if not -60 < b_age <= FALLBACK_MAX_AGE:
+                raise ValueError("B 이전 정상 캐시가 너무 오래되었습니다.")
+        elif b.get("stale") or not -60 < b_age <= MAX_AGE:
             raise ValueError("B 목록이 오래되었거나 조회 오류가 있습니다.")
         for x in b.get("items", []):
             if x.get("state") != "ING":
@@ -262,7 +277,8 @@ def load_sources(enabled_sources=None):
                 "B", x.get("seq"), x.get("name"), x.get("category"), x.get("league"), "",
                 {"seq": str(x.get("seq") or "")},
             ))
-        status["B"] = {"live": len([x for x in events if x["source"] == "B"]), "age": round(b_age, 1)}
+        status["B"] = {"live": len([x for x in events if x["source"] == "B"]), "age": round(b_age, 1),
+                       "fallback": b_fallback, "stale": b_age > MAX_AGE or bool(b.get("stale"))}
 
     if "C" in enabled:
         c_raw = json.loads(C_CACHE.read_text(encoding="utf-8"))
@@ -271,7 +287,13 @@ def load_sources(enabled_sources=None):
         c = read_c_preview()
         source_total = int(c_raw.get("sourceTotal") or 0)
         c_listing_ok = source_total > 0 or bool(c_raw.get("items"))
-        if not c.get("available") or c.get("stale") or not -60 < c_age <= MAX_AGE or not c_listing_ok:
+        c_fallback = "C" in allow_stale
+        if not c.get("available") or not c_listing_ok:
+            raise ValueError("C 목록 데이터가 없습니다.")
+        if c_fallback:
+            if not -60 < c_age <= FALLBACK_MAX_AGE:
+                raise ValueError("C 이전 정상 캐시가 너무 오래되었습니다.")
+        elif c.get("stale") or not -60 < c_age <= MAX_AGE:
             raise ValueError("C 목록이 오래되었거나 조회 오류가 있습니다.")
         for x in c.get("items", []):
             if x.get("state") != "ING":
@@ -281,7 +303,8 @@ def load_sources(enabled_sources=None):
                 {"id": str(x.get("id") or "")},
             ))
         status["C"] = {"live": len([x for x in events if x["source"] == "C"]), "age": round(c_age, 1),
-                       "source_total": source_total}
+                       "source_total": source_total, "fallback": c_fallback,
+                       "stale": c_age > MAX_AGE or bool(c.get("stale"))}
 
     return events, status
 
@@ -363,8 +386,8 @@ def merge_events(events, preferred="A"):
     return items, duplicate_count
 
 
-def build_merged(preferred="A", enabled_sources=None):
-    events, status = load_sources(enabled_sources=enabled_sources)
+def build_merged(preferred="A", enabled_sources=None, allow_stale_sources=None):
+    events, status = load_sources(enabled_sources=enabled_sources, allow_stale_sources=allow_stale_sources)
     items, duplicate_count = merge_events(events, preferred)
     return {
         "updated_at": datetime.now(timezone.utc).isoformat(),
