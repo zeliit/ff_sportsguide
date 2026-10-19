@@ -57,7 +57,11 @@
 
   <p id="c-status" class="small text-muted"></p>
   {% else %}
-  <div class="alert alert-warning">C 경기 목록이 없습니다. {{ c.error | e }}</div>
+  {% if c.pending %}
+  <div class="alert alert-info">C 경기 목록을 처음 갱신하는 중입니다. 잠시 기다려 주세요.</div>
+  {% else %}
+  <div class="alert alert-warning">C 경기 목록을 불러오지 못했습니다. {{ c.error | e }}</div>
+  {% endif %}
   {% endif %}
 </div>
 

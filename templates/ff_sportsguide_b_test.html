@@ -58,7 +58,11 @@
     실제 재생이 되더라도 모든 경기가 동일하게 동작하거나 장시간 안정성이 보장되는 것은 아닙니다.
   </p>
   {% else %}
-    <div class="alert alert-warning">B 경기 목록이 없습니다. {{ b.error | e }}</div>
+    {% if b.pending %}
+    <div class="alert alert-info">B 경기 목록을 처음 갱신하는 중입니다. 잠시 기다려 주세요.</div>
+    {% else %}
+    <div class="alert alert-warning">B 경기 목록을 불러오지 못했습니다. {{ b.error | e }}</div>
+    {% endif %}
   {% endif %}
 </div>
 <form id="sg-b-play-form" action="/videojs" method="post" target="sg-b-sports-player" style="display:none">

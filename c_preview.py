@@ -28,6 +28,7 @@ def _valid_referer(value):
 def read_c_preview():
     state = {
         "available": False,
+        "pending": not CACHE.exists(),
         "error": "",
         "items": [],
         "live": 0,
@@ -38,6 +39,9 @@ def read_c_preview():
         "stale": True,
         "source_url": provider_page_url("c") if provider_configured() else "",
     }
+    if not CACHE.exists():
+        state["error"] = "중계 C 경기 목록을 처음 갱신하는 중입니다."
+        return state
     try:
         data = json.loads(CACHE.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or not isinstance(data.get("items"), list):

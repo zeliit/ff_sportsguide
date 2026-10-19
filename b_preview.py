@@ -14,6 +14,7 @@ KST = timezone(timedelta(hours=9))
 def read_b_preview():
     state = {
         "available": False,
+        "pending": not CACHE.exists(),
         "error": "",
         "items": [],
         "live": 0,
@@ -24,6 +25,9 @@ def read_b_preview():
         "stale": True,
         "source_url": provider_page_url("b") if provider_configured() else "",
     }
+    if not CACHE.exists():
+        state["error"] = "중계 B 경기 목록을 처음 갱신하는 중입니다."
+        return state
     try:
         data = json.loads(CACHE.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or not isinstance(data.get("items"), list):
