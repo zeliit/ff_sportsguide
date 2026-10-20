@@ -68,6 +68,10 @@ def _purge_nonprivate_playwright():
     if module is None or location.startswith(root + os.sep):
         return
     for name in list(sys.modules):
+        # Some FF plugin loaders may keep non-string objects in sys.modules.
+        # Never assume every key implements string methods.
+        if not isinstance(name, str):
+            continue
         if name == "playwright" or name.startswith("playwright."):
             sys.modules.pop(name, None)
 

@@ -1,4 +1,10 @@
-# FF 스포츠 중계 v0.4.15
+# FF 스포츠 중계 v0.4.16
+
+## v0.4.16 변경사항
+
+- 일부 FF 플러그인 로더가 sys.modules에 문자열이 아닌 모듈 객체를 키로 보관하는 환경에서도 SportsGuide Playwright 격리 로직이 안전하게 동작하도록 보강했습니다.
+- ff_chzzk.source_chzzk 같은 외부 플러그인 모듈 객체가 sys.modules 키로 존재해도 .startswith()를 호출하지 않고 그대로 건너뜁니다.
+- 해당 충돌 상황을 인위적으로 재현해 0.4.15의 AttributeError를 확인한 뒤, 수정 후 같은 조건에서 Playwright 1.58.0 및 Chromium 1208 실행까지 정상 동작하는 것을 검증했습니다.
 
 ## v0.4.15 변경사항
 
