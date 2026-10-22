@@ -29,7 +29,7 @@ from .b_hls_test import issue_ticket as b_issue_ticket, serve_root as b_serve_ro
 from .c_preview import read_c_preview
 from .c_refresh import refresh_c_list
 from .c_hls import issue_ticket as c_issue_ticket, serve_root as c_serve_root, serve_asset as c_serve_asset, serve_fixture as c_serve_fixture
-from .merged import build_merged, save_merged, read_merged
+from .merged import build_merged, save_merged, read_merged, expired_fallback_sources
 
 logger = P.logger
 ModelSetting = P.ModelSetting
@@ -533,13 +533,22 @@ def refresh_all_synced(force=True):
                 sources[source]["error"] = errors[source]
 
     omitted_sources = requested_sources - usable_sources
-    if omitted_sources:
+    expired_omitted = expired_fallback_sources(omitted_sources, fallback_sources, sources)
+    preserve_omitted = omitted_sources - expired_omitted
+
+    if expired_omitted:
+        logger.warning(
+            "[SportsGuide] stale fallback expired; dropping source(s)=%s and continuing with=%s",
+            sorted(expired_omitted), sorted(usable_sources),
+        )
+
+    if preserve_omitted:
         old = read_merged()
         if isinstance(old, dict) and isinstance(old.get("items"), list):
             message = "일부 소스 갱신 실패로 마지막 정상 통합 목록과 Alive를 유지합니다."
             logger.warning(
                 "[SportsGuide] partial refresh preserved omitted=%s errors=%s",
-                sorted(omitted_sources), errors,
+                sorted(preserve_omitted), errors,
             )
             return {
                 "ret": "success", "degraded": True, "preserved": True,

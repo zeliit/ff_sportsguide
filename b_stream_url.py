@@ -15,7 +15,7 @@ def validate_root_stream_url(value, seq):
     if (parsed.scheme != "https" or parsed.hostname not in frozenset(provider_list("b_cdn_hosts"))
             or parsed.port not in (None, 443) or parsed.username or parsed.password
             or parsed.fragment):
-        raise ValueError("Invalid B stream host")
+        raise ValueError("Invalid B stream host: " + str(parsed.hostname or "<none>"))
     if ("%" in parsed.path or "\\" in parsed.path or "//" in parsed.path
             or "/./" in parsed.path or "/../" in parsed.path):
         raise ValueError("Invalid B stream path")

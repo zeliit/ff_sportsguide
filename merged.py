@@ -19,6 +19,22 @@ C_CACHE = RUNTIME_DIR / "c_snapshot.json"
 MAX_AGE = 15 * 60
 FALLBACK_MAX_AGE = 6 * 60 * 60
 
+
+def expired_fallback_sources(omitted_sources, fallback_sources, source_info):
+    """Return omitted sources whose previous good cache exceeded fallback TTL."""
+    omitted = {str(x).upper() for x in (omitted_sources or ())}
+    fallback = {str(x).upper() for x in (fallback_sources or ())}
+    expired = set()
+    for source in omitted & fallback:
+        value = (source_info or {}).get(source, {}).get("cache_age_seconds")
+        try:
+            age = float(value)
+        except (TypeError, ValueError):
+            continue
+        if age > FALLBACK_MAX_AGE:
+            expired.add(source)
+    return expired
+
 SPORT_MAP = {
     "축구": "축구", "soccer": "축구", "football": "축구",
     "농구": "농구", "basketball": "농구", "basket": "농구",
