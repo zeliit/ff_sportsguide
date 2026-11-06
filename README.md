@@ -1,4 +1,10 @@
-# FF 스포츠 중계 v0.4.17
+# FF 스포츠 중계 v0.4.18
+
+## v0.4.18 변경사항
+
+- 중계 B 제공처의 CDN 변경에 대응하여 새 `klwefz.com` CDN(`wcdn`/`scdn`/`kcdn`)을 정확한 허용 목록에 추가했습니다.
+- 실제 B 갱신에서 `scdn.klwefz.com`이 반환되면서 `Invalid B stream host`로 차단되던 문제를 수정했습니다.
+- 기존 `opolfdb.com`, `greigfd.com` CDN 허용 목록은 그대로 유지하여 이전/혼용 환경과의 호환성을 보존합니다.
 
 ## v0.4.17 변경사항
 
