@@ -23,9 +23,12 @@
     <div class="form-group row">
       <label class="col-sm-3 col-form-label" for="sg-alive-enable">자동 동기화</label>
       <div class="col-sm-9">
-        <div class="custom-control custom-checkbox mt-2">
-          <input class="custom-control-input" type="checkbox" id="sg-alive-enable" name="alive_enable" value="true" {% if arg.alive_enable %}checked{% endif %}>
-          <label class="custom-control-label" for="sg-alive-enable">경기 목록이 갱신될 때 Alive 채널 추가·변경·종료 채널 삭제</label>
+        <div class="mt-2">
+          <label for="sg-alive-enable" style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+            <input type="checkbox" id="sg-alive-enable" name="alive_enable" value="true" {% if arg.alive_enable %}checked{% endif %} style="width:18px;height:18px;">
+            <span>Alive 자동 동기화 ON/OFF</span>
+          </label>
+          <small class="form-text text-muted">ON이면 경기 목록 갱신 시 Alive 채널 추가·변경·종료 채널 삭제를 자동 반영합니다.</small>
         </div>
       </div>
     </div>
