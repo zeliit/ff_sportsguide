@@ -14,7 +14,7 @@ from tool import ToolUtil
 
 from .hls_proxy import _secret
 from .proxy_config import configured_playback_proxy_url, requests_proxy_options, safe_network_error
-from .b_stream_url import validate_root_stream_url
+from .b_stream_url import is_b_cdn_host, validate_root_stream_url
 from .provider_config import provider_list, require_provider_value
 
 BASE = "/ff_sportsguide/api/"
@@ -46,7 +46,7 @@ def _safe_channel(value):
 def _validate_url(url, channel):
     channel = _safe_channel(channel)
     parsed = urlsplit(url)
-    if (parsed.scheme != "https" or parsed.hostname not in frozenset(provider_list("b_cdn_hosts")) or parsed.port not in (None, 443)
+    if (parsed.scheme != "https" or not is_b_cdn_host(parsed.hostname) or parsed.port not in (None, 443)
             or parsed.username or parsed.password or parsed.fragment):
         raise ValueError("허용되지 않은 중계 B HLS 호스트입니다.")
     raw = parsed.path
@@ -62,7 +62,7 @@ def _root_url(channel, host=None):
     channel = _safe_channel(channel)
     if host is None:
         host = require_provider_value("b_primary_cdn_host")
-    if host not in frozenset(provider_list("b_cdn_hosts")):
+    if not is_b_cdn_host(host):
         raise ValueError("Unsupported B CDN")
     return "https://" + host + "/bigwinsoft/" + channel + "/playlist.m3u8"
 
