@@ -13,6 +13,9 @@ def is_b_cdn_host(host):
         return False
     if host in frozenset(item.lower().rstrip(".") for item in provider_list("b_cdn_hosts")):
         return True
+    # Only recognized CDN shard prefixes qualify for an approved domain wildcard.
+    if not re.fullmatch(r"(?:wcdn|scdn|kcdn)\\.[a-z0-9.-]+", host):
+        return False
     for suffix in provider_list("b_cdn_host_suffixes"):
         suffix = suffix.strip().lower().lstrip(".").rstrip(".")
         if suffix and host.endswith("." + suffix):
