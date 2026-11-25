@@ -65,7 +65,9 @@ def require_provider_value(key):
 def set_base_url(base_url):
     # Keep the local runtime file intentionally minimal. Provider layout values
     # ship with the plugin and are updated through normal plugin updates.
-    save_provider_config({"base_url": str(base_url or "").strip()})
+    data = load_provider_config()
+    data["base_url"] = str(base_url or "").strip()
+    save_provider_config(data)
 
 
 def migrate_provider_config():
@@ -74,6 +76,9 @@ def migrate_provider_config():
         return False
     base = str(data.get("base_url") or "").strip()
     minimal = {"base_url": base} if base else {}
+    for key in ("b_cdn_hosts", "b_cdn_host_suffixes"):
+        if isinstance(data.get(key), list):
+            minimal[key] = data[key]
     if data != minimal:
         save_provider_config(minimal)
         return True
